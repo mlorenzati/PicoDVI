@@ -4,6 +4,10 @@
 add_library(libdvi INTERFACE)
 
 target_sources(libdvi INTERFACE
+	${CMAKE_CURRENT_LIST_DIR}/audio_ring.c
+	${CMAKE_CURRENT_LIST_DIR}/audio_ring.h
+	${CMAKE_CURRENT_LIST_DIR}/data_packet.c
+	${CMAKE_CURRENT_LIST_DIR}/data_packet.h
 	${CMAKE_CURRENT_LIST_DIR}/dvi.c
 	${CMAKE_CURRENT_LIST_DIR}/dvi.h
 	${CMAKE_CURRENT_LIST_DIR}/dvi_config_defs.h
