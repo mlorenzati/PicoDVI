@@ -89,6 +89,15 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
 // whichever core called this function. Registers an exclusive IRQ handler.
 void dvi_register_irqs_this_core(struct dvi_inst *inst, uint irq_num);
 
+// Unregisters DVI IRQ callbacks for this core and returns any in-flight TMDS
+// buffers to the free queue. Call before dvi_stop() when tearing down DVI.
+void dvi_unregister_irqs_this_core(struct dvi_inst *inst, uint irq_num);
+
+// Reports DVI status: true = active, false = inactive.
+static inline bool dvi_is_started(struct dvi_inst *inst) {
+	return inst->dvi_started;
+}
+
 // Start actually wiggling TMDS pairs. Call this once you have initialised the
 // DVI, have registered the IRQs, and are producing rendered scanlines.
 void dvi_start(struct dvi_inst *inst);

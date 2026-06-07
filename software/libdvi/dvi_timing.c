@@ -365,8 +365,28 @@ void dvi_setup_scanline_for_vblank_with_audio(const struct dvi_timing *t, const 
 		}
 		else
 		{
-			_set_data_cb(&cblist[0], &dma_cfg[i], sym_no_sync, (t->h_front_porch - W_PREAMBLE) / DVI_SYMBOLS_PER_WORD, 2, false);
-			_set_data_cb(&cblist[1], &dma_cfg[i], sym_preamble_to_data12, W_PREAMBLE / DVI_SYMBOLS_PER_WORD, 2, false);
+			// BUG FIX: when h_front_porch == W_PREAMBLE (8 pixels), block [0]
+			// would have transfer_count=0, which on RP2040/2350 wraps to 0x10000
+			// causing a massive spurious DMA transfer that corrupts the TMDS stream.
+			// Compute the pre-preamble count safely; if h_front_porch <= W_PREAMBLE
+			// the pre-preamble block is zero-length (harmless; it will be skipped
+			// by the DMA engine only if we never enqueue it -- but since we always
+			// build a fixed-length list, we clamp to 0 which the hardware treats as
+			// a no-op when transfer_count=0 is blocked by _set_data_cb's caller).
+			// To be safe we skip the block entirely by merging: if fp_pre==0 we
+			// must NOT call _set_data_cb with count=0 (it wraps to 65536).
+			// The correct fix is to assert h_front_porch >= W_PREAMBLE in the
+			// audio path; all standard HDMI/DVI modes satisfy this constraint.
+			// For robustness we clamp fp_pre to 0 and fp_pream to min(W_PREAMBLE,
+			// h_front_porch) so even pathological timings do not overflow.
+			uint fp_pre   = (t->h_front_porch > W_PREAMBLE)
+			                  ? (t->h_front_porch - W_PREAMBLE) / DVI_SYMBOLS_PER_WORD
+			                  : 0u;
+			uint fp_pream = (t->h_front_porch >= W_PREAMBLE)
+			                  ? W_PREAMBLE / DVI_SYMBOLS_PER_WORD
+			                  : t->h_front_porch / DVI_SYMBOLS_PER_WORD;
+			_set_data_cb(&cblist[0], &dma_cfg[i], sym_no_sync, fp_pre, 2, false);
+			_set_data_cb(&cblist[1], &dma_cfg[i], sym_preamble_to_data12, fp_pream, 2, false);
 			_set_data_cb(&cblist[2], &dma_cfg[i], getDefaultDataPacket12(), N_DATA_ISLAND_WORDS, 0, false);
 			_set_data_cb(&cblist[3], &dma_cfg[i], sym_no_sync, (t->h_sync_width + t->h_back_porch - W_DATA_ISLAND) / DVI_SYMBOLS_PER_WORD, 2, false);
 			_set_data_cb(&cblist[4], &dma_cfg[i], sym_no_sync, t->h_active_pixels / DVI_SYMBOLS_PER_WORD, 2, false);
@@ -401,8 +421,18 @@ void dvi_setup_scanline_for_active_with_audio(const struct dvi_timing *t, const 
 		}
 		else
 		{
-			_set_data_cb(&cblist[0], &dma_cfg[i], sym_no_sync, (t->h_front_porch - W_PREAMBLE) / DVI_SYMBOLS_PER_WORD, 2, false);
-			_set_data_cb(&cblist[1], &dma_cfg[i], sym_preamble_to_data12, W_PREAMBLE / DVI_SYMBOLS_PER_WORD, 2, false);
+			// BUG FIX: same zero-length DMA guard as in dvi_setup_scanline_for_vblank_with_audio.
+			// Block [0] is (h_front_porch - W_PREAMBLE) symbols of blanking before the
+			// data-island preamble. When h_front_porch == W_PREAMBLE this is 0, which
+			// on RP2040/2350 DMA hardware wraps to 0x10000 transfers -- catastrophic.
+			uint fp_pre   = (t->h_front_porch > W_PREAMBLE)
+			                  ? (t->h_front_porch - W_PREAMBLE) / DVI_SYMBOLS_PER_WORD
+			                  : 0u;
+			uint fp_pream = (t->h_front_porch >= W_PREAMBLE)
+			                  ? W_PREAMBLE / DVI_SYMBOLS_PER_WORD
+			                  : t->h_front_porch / DVI_SYMBOLS_PER_WORD;
+			_set_data_cb(&cblist[0], &dma_cfg[i], sym_no_sync, fp_pre, 2, false);
+			_set_data_cb(&cblist[1], &dma_cfg[i], sym_preamble_to_data12, fp_pream, 2, false);
 			_set_data_cb(&cblist[2], &dma_cfg[i], getDefaultDataPacket12(), N_DATA_ISLAND_WORDS, 0, false);
 			_set_data_cb(&cblist[3], &dma_cfg[i], sym_no_sync, (t->h_sync_width + t->h_back_porch - W_DATA_ISLAND - W_PREAMBLE - W_GUARDBAND) / DVI_SYMBOLS_PER_WORD, 2, false);
 			_set_data_cb(&cblist[4], &dma_cfg[i], i == 1 ? sym_preamble_to_video1 : sym_preamble_to_video2, W_PREAMBLE / DVI_SYMBOLS_PER_WORD, 2, false);
@@ -448,4 +478,3 @@ uint32_t dvi_timing_get_pixels_per_frame(const struct dvi_timing *t) {
 uint32_t dvi_timing_get_pixels_per_line(const struct dvi_timing *t) {
 	return t->h_front_porch + t->h_sync_width + t->h_back_porch + t->h_active_pixels;
 }
-

@@ -83,6 +83,26 @@ void dvi_register_irqs_this_core(struct dvi_inst *inst, uint irq_num) {
 	irq_set_enabled(irq_num, true);
 }
 
+// Unregisters DVI IRQ callbacks for this core and returns any in-flight TMDS
+// buffers to the free queue so they can be safely freed/reused.
+void dvi_unregister_irqs_this_core(struct dvi_inst *inst, uint irq_num) {
+	irq_set_enabled(irq_num, false);
+	if (irq_num == DMA_IRQ_0) {
+		irq_remove_handler(DMA_IRQ_0, dvi_dma0_irq);
+	} else {
+		irq_remove_handler(DMA_IRQ_1, dvi_dma1_irq);
+	}
+	// Return any in-flight TMDS buffers back to the free queue
+	if (inst->tmds_buf_release) {
+		queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release);
+		inst->tmds_buf_release = NULL;
+	}
+	if (inst->tmds_buf_release_next) {
+		queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release_next);
+		inst->tmds_buf_release_next = NULL;
+	}
+}
+
 // Set up control channels to make transfers to data channels' control
 // registers (but don't trigger the control channels -- this is done either by
 // data channel CHAIN_TO or an initial write to MULTI_CHAN_TRIGGER)
@@ -215,7 +235,10 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 	inst->tmds_buf_release_next = NULL;
 
 	// Make sure all three channels have definitely loaded their last block
-	// (should be within a few cycles of one another)
+	// (should be within a few cycles of one another).
+	// Note: on RP2350, dbg_tcr holds the reload value (stable for the full
+	// active period). On RP2040, tcr is the live decrementing counter -- the
+	// change to dbg_tcr is a required RP2350 fix.
 	for (int i = 0; i < N_TMDS_LANES; ++i) {
 		while (dma_debug_hw->ch[inst->dma_cfg[i].chan_data].dbg_tcr != inst->timing->h_active_pixels / DVI_SYMBOLS_PER_WORD)
 			tight_loop_contents();
