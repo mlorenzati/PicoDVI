@@ -209,26 +209,17 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 	// now have until the end of this region to generate DMA blocklist for next
 	// scanline.
 	dvi_timing_state_advance(inst->timing, &inst->timing_state);
-
-	// Make sure all three channels have definitely loaded their last block
-	// (should be within a few cycles of one another).
-	// In audio mode the IRQ fires at end of the video guardband on the sync lane.
-	// Non-sync lanes have already entered their active block by then (their blanking
-	// sequence is shorter), so dbg_tcr has already counted past h_active_pixels for
-	// those lanes and waiting on them would deadlock. Only wait on the sync lane.
-	// In non-audio mode all lanes enter the active block simultaneously so we can
-	// safely wait on all of them.
-	int wait_lanes = inst->data_island_is_enabled ? TMDS_SYNC_LANE + 1 : N_TMDS_LANES;
-	for (int i = TMDS_SYNC_LANE; i < wait_lanes; ++i) {
-		while (dma_debug_hw->ch[inst->dma_cfg[i].chan_data].dbg_tcr != inst->timing->h_active_pixels / DVI_SYMBOLS_PER_WORD)
-			tight_loop_contents();
-	}
-
-	// Release the old TMDS buffer AFTER confirming DMA has finished reading it.
 	if (inst->tmds_buf_release && !queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release))
 		panic("TMDS free queue full in IRQ!");
 	inst->tmds_buf_release = inst->tmds_buf_release_next;
 	inst->tmds_buf_release_next = NULL;
+
+	// Make sure all three channels have definitely loaded their last block
+	// (should be within a few cycles of one another)
+	for (int i = 0; i < N_TMDS_LANES; ++i) {
+		while (dma_debug_hw->ch[inst->dma_cfg[i].chan_data].dbg_tcr != inst->timing->h_active_pixels / DVI_SYMBOLS_PER_WORD)
+			tight_loop_contents();
+	}
 
 	uint32_t *tmdsbuf;
 	while (inst->late_scanline_ctr > 0 && queue_try_remove_u32(&inst->q_tmds_valid, &tmdsbuf)) {
