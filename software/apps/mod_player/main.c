@@ -125,6 +125,7 @@ bool audio_timer_callback(struct repeating_timer *t) {
 	memset(audio_ptr, 0, size * sizeof(audio_sample_t));
 	micromod_get_audio((short *) audio_ptr, size);
     increase_write_pointer(&dvi0.audio_ring, size);
+	current_mod_samples_played += size;
  
     return true;
 }
@@ -139,6 +140,7 @@ void __not_in_flash("render") render_loop() {
 				sprite_sprite16(pixbuf, &berry[i], y, FRAME_WIDTH);
 			queue_add_blocking(&dvi0.q_colour_valid, &pixbuf);
 		}
+		
 		// Update during vblank
 		for (int i = 0; i < N_BERRIES; ++i) {
 			berry[i].x += vx[i];
@@ -160,6 +162,10 @@ void __not_in_flash("render") render_loop() {
 				berry[i].hflip = vx[i] < 0;
 				berry[i].vflip = vy[i] < 0;
 			}
+		}
+		if (current_mod_samples_played >= current_mod_duration) {
+			current_mod_idx = (current_mod_idx + 1) % mod_count;
+			start_mod(current_mod_idx);
 		}
 	}
 }
