@@ -118,18 +118,19 @@ void start_mod(uint8_t idx) {
 	current_mod_samples_played = 0;
 }
 
-bool audio_timer_callback(struct repeating_timer *t) {
-    uint32_t size = get_write_size(&dvi0.audio_ring, false);
-    audio_sample_t *audio_ptr = get_write_pointer(&dvi0.audio_ring);
+volatile bool feed_audio = false;
+bool __not_in_flash("audio_timer_callback") audio_timer_callback(struct repeating_timer *t) {
+    feed_audio = true;
+	uint32_t size = get_write_size(&dvi0.audio_ring, false);
+	audio_sample_t *audio_ptr = get_write_pointer(&dvi0.audio_ring);
 	memset(audio_ptr, 0, size * sizeof(audio_sample_t));
 	micromod_get_audio((short *) audio_ptr, size);
-    increase_write_pointer(&dvi0.audio_ring, size);
+	increase_write_pointer(&dvi0.audio_ring, size);
 	current_mod_samples_played += size;
- 
     return true;
 }
 
-static inline void core1_scanline_callback() {
+void __not_in_flash("core1_scanline_callback") core1_scanline_callback() {
 	void *bufptr  = NULL;
 	queue_remove_blocking(&dvi0.q_colour_free, &bufptr);
 	bufptr = &framebuf[hdmi_scanline];
@@ -138,11 +139,29 @@ static inline void core1_scanline_callback() {
 	if (++hdmi_scanline >= FRAME_HEIGHT) {
 		hdmi_scanline = 0;
 	}
+}
 
-	if (current_mod_samples_played >= current_mod_duration) {
-		current_mod_idx = (current_mod_idx + 1) % mod_count;
-		start_mod(current_mod_idx);
-	}
+void draw_player() {
+	printf("Start rendering\n");
+
+	// Mod Name area
+	draw_rect(&graphic_ctx, 3, 3, graphic_ctx.width - 6, 12, color_light_gray);
+
+	// Main rect
+	draw_rect(&graphic_ctx, 1, 1, graphic_ctx.width - 2, graphic_ctx.height - 2, color_light_gray);
+	draw_rect(&graphic_ctx, 0, 0, graphic_ctx.width, graphic_ctx.height, color_blue);
+
+	// Status area
+	draw_rect(&graphic_ctx, 3, graphic_ctx.height - 16, graphic_ctx.width - 6, 12, color_light_gray);
+	
+	char song_name[24];
+	micromod_get_string(0, song_name);
+	song_name[16] = 0;
+
+	draw_textf(&graphic_ctx, 5, 5, color_white, color_black, false, "Name:%s |Duration:%ds", song_name, current_mod_duration / AUDIO_FREQUENCY);
+	draw_textf(&graphic_ctx, 5, graphic_ctx.height - 14, color_white, color_black, false, "Left:%ds",  (current_mod_duration - current_mod_samples_played) / AUDIO_FREQUENCY);
+	
+	//draw_line(&graphic_ctx, 0, 0, graphic_ctx.width - 1, graphic_ctx.height - 1, color_blue);
 }
 
 int main() {
@@ -171,8 +190,8 @@ int main() {
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
     
     // HDMI Audio related
-    dvi_get_blank_settings(&dvi0)->top    = 4 * 2;
-    dvi_get_blank_settings(&dvi0)->bottom = 4 * 2;
+    dvi_get_blank_settings(&dvi0)->top    = 0;
+    dvi_get_blank_settings(&dvi0)->bottom = 0;
     dvi_audio_sample_buffer_set(&dvi0, audio_buffer, AUDIO_BUFFER_SIZE);
     dvi_set_audio_freq(&dvi0, AUDIO_FREQUENCY, 28000, 6272);
     add_repeating_timer_ms(2, audio_timer_callback, NULL, &audio_timer);
@@ -187,39 +206,22 @@ int main() {
 		queue_add_blocking((void*)&dvi0.q_colour_valid, &bufptr);
 	}
 
-	printf("Start rendering\n");
-	uint x, y, a;
-	uint sizex = graphic_ctx.width / 2;
-	uint sizey = graphic_ctx.height / 2;
-
-	//Draw boxes
-	for (int i = 0; i < 6; i++) {
-		int valx = (graphic_ctx.width * i)  / 30;
-		int valy = (graphic_ctx.height * i) / 15;
-		fill_rect(&graphic_ctx, valx, valy, graphic_ctx.width - (2 * valx), graphic_ctx.height - (2 * valy), color_list[i]);
-	}
-
-	//Draw circles
-	for (a = 0; a < 16; a++) {
-		x = sizex + sizex/2 * sin(2*M_PI*a/16);
-		y = sizey + sizey/2 * cos(2*M_PI*a/16);
-		draw_circle(&graphic_ctx, x, y, 16, color_red);
-		draw_circle(&graphic_ctx, x, y, 8, color_red);
-		draw_flood(&graphic_ctx, x + 10, y, color_blue, color_red, true);
-	}
-	
-	//Draw lines
-	draw_line(&graphic_ctx, 0, 0, graphic_ctx.width - 1, graphic_ctx.height - 1, color_blue);
-	draw_line(&graphic_ctx, graphic_ctx.width - 1, 0, 0, graphic_ctx.height - 1, color_blue);
-
-	//Draw rectangle
-	draw_rect(&graphic_ctx, graphic_ctx.width / 16, graphic_ctx.height / 12, graphic_ctx.width - graphic_ctx.width / 8, graphic_ctx.height - graphic_ctx.height / 8, color_mid_gray);
-
-	//Draw text
-	draw_textf(&graphic_ctx, graphic_ctx.width / 6, (graphic_ctx.height * 63) / 100, color_mid_gray, color_white, false, "This is a test of RGB%s %d", "565", 2026);
+	draw_player();
 
 	while (1)
 	{
+		// if (++ms_2count >= 500) {
+		// 	ms_2count = 0;
+		// 	// Second event
+		// 	draw_textf(&graphic_ctx, 5, graphic_ctx.height - 14, color_white, color_black, false, "Left:%ds",  (current_mod_duration - current_mod_samples_played) / AUDIO_FREQUENCY);
+
+		// 	if (current_mod_samples_played >= current_mod_duration) {
+		// 		current_mod_idx = (current_mod_idx + 1) % mod_count;
+		// 		start_mod(current_mod_idx);
+		// 		draw_player();
+		// 	}
+		// }
+		
 		sleep_ms(1000);
 	}
 	__builtin_unreachable();
