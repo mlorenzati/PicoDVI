@@ -52,5 +52,6 @@ include_directories(
 
 add_subdirectory(libdvi)
 add_subdirectory(libsprite)
-
+add_subdirectory(libcolor)
+add_subdirectory(libgraphics)
 add_subdirectory(apps)

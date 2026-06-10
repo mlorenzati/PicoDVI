@@ -16,8 +16,8 @@
 
 #include "micromod.h"
 #include "mods.h"
-
-#include "sprite.h"
+#include "graphics.h"
+#include "math.h"
 
 // Pick one:
 #define MODE_640x480_60Hz
@@ -25,9 +25,6 @@
 // #define MODE_800x600_60Hz
 // #define MODE_960x540p_60Hz
 // #define MODE_1280x720_30Hz
-
-#include "raspberry_128x128_rgab5515.h"
-#include "eben_128x128_rgab5515.h"
 
 #if defined(MODE_640x480_60Hz)
 // DVDD 1.2V (1.1V seems ok too)
@@ -71,6 +68,28 @@
 
 #define N_BERRIES 10
 
+// Colors 16bits         0brrrrrggggggbbbbb
+#define color_black      0b0000000000000000
+#define color_dark_gray  0b0001100011100011
+#define color_mid_gray   0b1010010100010000
+#define color_light_gray 0b1100011000011000
+#define color_white      0b1111111111111111
+#define color_red        0b1111100000000000
+#define color_green      0b0000011111100000
+#define color_blue       0b0000000000011111
+
+static uint hdmi_scanline = 2;
+uint16_t framebuf[FRAME_HEIGHT][FRAME_WIDTH];
+static graphic_ctx_t graphic_ctx = {
+	.height       = FRAME_HEIGHT,
+	.width        = FRAME_WIDTH,
+	.video_buffer = framebuf,
+	.bppx 		  = rgb_16_565,
+	.parent       = NULL
+};
+
+const uint color_list[] = {color_red, color_green, color_blue, color_white, color_mid_gray, color_black};
+
 struct dvi_inst dvi0;
 
 void core1_main() {
@@ -81,26 +100,6 @@ void core1_main() {
 	dvi_scanbuf_main_16bpp(&dvi0);
 	__builtin_unreachable();
 }
-
-static inline int clip(int x, int min, int max) {
-	return x < min ? min : x > max ? max : x;
-}
-
-#define N_SCANLINE_BUFFERS 4
-uint16_t static_scanbuf[N_SCANLINE_BUFFERS][FRAME_WIDTH];
-
-sprite_t berry[N_BERRIES];
-int vx[N_BERRIES];
-int vy[N_BERRIES];
-int vt[N_BERRIES];
-uint8_t theta[N_BERRIES];
-affine_transform_t atrans[N_BERRIES];
-
-const int xmin = -100;
-const int xmax = FRAME_WIDTH - 30;
-const int ymin = -100;
-const int ymax = FRAME_HEIGHT - 30;
-const int vmax = 4;
 
 //Audio Related
 #define AUDIO_FREQUENCY 	44100
@@ -130,43 +129,19 @@ bool audio_timer_callback(struct repeating_timer *t) {
     return true;
 }
 
-void __not_in_flash("render") render_loop() {
-	while (1) {
-		for (uint y = 0; y < FRAME_HEIGHT; ++y) {
-			uint16_t *pixbuf;
-			queue_remove_blocking(&dvi0.q_colour_free, &pixbuf);
-			sprite_fill16(pixbuf, 0x07ff, FRAME_WIDTH);
-			for (int i = 0; i < N_BERRIES; ++i)
-				sprite_sprite16(pixbuf, &berry[i], y, FRAME_WIDTH);
-			queue_add_blocking(&dvi0.q_colour_valid, &pixbuf);
-		}
-		
-		// Update during vblank
-		for (int i = 0; i < N_BERRIES; ++i) {
-			berry[i].x += vx[i];
-			berry[i].y += vy[i];
-			theta[i] += vt[i];
-			affine_identity(atrans[i]);
-			affine_scale(atrans[i], 7 * AF_ONE / 8, 7 * AF_ONE / 8);
-			affine_translate(atrans[i], -56, -56);
-			affine_rotate(atrans[i], theta[i]);
-			affine_translate(atrans[i], 60, 60);
-			int xclip = clip(berry[i].x, xmin, xmax);
-			int yclip = clip(berry[i].y, ymin, ymax);
-			if (xclip != berry[i].x || yclip != berry[i].y) {
-				berry[i].x = xclip;
-				berry[i].y = yclip;
-				vx[i] = (rand() % vmax + 1) * (rand() & 0x8000 ? 1 : -1);
-				vy[i] = (rand() % vmax + 1) * (rand() & 0x8000 ? 1 : -1);
-				vt[i] = (rand() % vmax + 1) * (rand() & 0x8000 ? 1 : -1);
-				berry[i].hflip = vx[i] < 0;
-				berry[i].vflip = vy[i] < 0;
-			}
-		}
-		if (current_mod_samples_played >= current_mod_duration) {
-			current_mod_idx = (current_mod_idx + 1) % mod_count;
-			start_mod(current_mod_idx);
-		}
+static inline void core1_scanline_callback() {
+	void *bufptr  = NULL;
+	queue_remove_blocking(&dvi0.q_colour_free, &bufptr);
+	bufptr = &framebuf[hdmi_scanline];
+
+	queue_add_blocking(&dvi0.q_colour_valid, &bufptr);
+	if (++hdmi_scanline >= FRAME_HEIGHT) {
+		hdmi_scanline = 0;
+	}
+
+	if (current_mod_samples_played >= current_mod_duration) {
+		current_mod_idx = (current_mod_idx + 1) % mod_count;
+		start_mod(current_mod_idx);
 	}
 }
 
@@ -192,6 +167,7 @@ int main() {
 
 	dvi0.timing = &DVI_TIMING;
 	dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
+	dvi0.scanline_callback = core1_scanline_callback;
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
     
     // HDMI Audio related
@@ -206,29 +182,46 @@ int main() {
 	multicore_launch_core1(core1_main);
 
 	printf("Allocating scanline buffers\n");
-	for (int i = 0; i < N_SCANLINE_BUFFERS; ++i) {
-		void *bufptr = &static_scanbuf[i];
-		queue_add_blocking((void*)&dvi0.q_colour_free, &bufptr);
+	for (int i = 0; i < hdmi_scanline; ++i) {
+		void *bufptr = &framebuf[i];
+		queue_add_blocking((void*)&dvi0.q_colour_valid, &bufptr);
 	}
 
-	for (int i = 0; i < N_BERRIES; ++i) {
-		berry[i].x = rand() % (xmax - xmin + 1) + xmin;
-		berry[i].y = rand() % (ymax - ymin + 1) + ymin;
-		berry[i].img = i % 2 ? eben_128x128 : raspberry_128x128;
-		berry[i].log_size = 7;
-		berry[i].has_opacity_metadata = true; // Much faster non-AT blitting
-		berry[i].hflip = false;
-		berry[i].vflip = false;
-		vx[i] = (rand() % vmax + 1) * (rand() & 0x8000 ? 1 : -1);
-		vy[i] = (rand() % vmax + 1) * (rand() & 0x8000 ? 1 : -1);
-		vt[i] = (rand() % vmax + 1) * (rand() & 0x8000 ? 1 : -1);
-		theta[i] = 0;
-		affine_identity(atrans[i]);
-	}
-
-	// Core 1 will fire up the DVI once it sees the first colour buffer has been rendered
 	printf("Start rendering\n");
-	render_loop();
+	uint x, y, a;
+	uint sizex = graphic_ctx.width / 2;
+	uint sizey = graphic_ctx.height / 2;
+
+	//Draw boxes
+	for (int i = 0; i < 6; i++) {
+		int valx = (graphic_ctx.width * i)  / 30;
+		int valy = (graphic_ctx.height * i) / 15;
+		fill_rect(&graphic_ctx, valx, valy, graphic_ctx.width - (2 * valx), graphic_ctx.height - (2 * valy), color_list[i]);
+	}
+
+	//Draw circles
+	for (a = 0; a < 16; a++) {
+		x = sizex + sizex/2 * sin(2*M_PI*a/16);
+		y = sizey + sizey/2 * cos(2*M_PI*a/16);
+		draw_circle(&graphic_ctx, x, y, 16, color_red);
+		draw_circle(&graphic_ctx, x, y, 8, color_red);
+		draw_flood(&graphic_ctx, x + 10, y, color_blue, color_red, true);
+	}
+	
+	//Draw lines
+	draw_line(&graphic_ctx, 0, 0, graphic_ctx.width - 1, graphic_ctx.height - 1, color_blue);
+	draw_line(&graphic_ctx, graphic_ctx.width - 1, 0, 0, graphic_ctx.height - 1, color_blue);
+
+	//Draw rectangle
+	draw_rect(&graphic_ctx, graphic_ctx.width / 16, graphic_ctx.height / 12, graphic_ctx.width - graphic_ctx.width / 8, graphic_ctx.height - graphic_ctx.height / 8, color_mid_gray);
+
+	//Draw text
+	draw_textf(&graphic_ctx, graphic_ctx.width / 6, (graphic_ctx.height * 63) / 100, color_mid_gray, color_white, false, "This is a test of RGB%s %d", "565", 2026);
+
+	while (1)
+	{
+		sleep_ms(1000);
+	}
 	__builtin_unreachable();
 }
 	

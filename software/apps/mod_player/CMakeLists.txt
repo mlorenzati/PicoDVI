@@ -30,7 +30,7 @@ target_link_libraries(mod_player
 	pico_util
 	hardware_timer
 	libdvi
-	libsprite
+	libgraphics
 )
 
 # create map/bin/hex file etc.
