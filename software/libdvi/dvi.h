@@ -143,9 +143,6 @@ void dvi_update_data_packet(struct dvi_inst *inst);
 void dvi_wait_for_valid_line(struct dvi_inst *inst);
 
 // Get blank settings struct (top/bottom blank lines).
-// IMPORTANT: Must be called AFTER dvi_init(), because dvi_init() calls
-// dvi_audio_init() which zeroes blank_settings. Setting blank values before
-// dvi_init() will have no effect.
 static inline dvi_blank_t *dvi_get_blank_settings(struct dvi_inst *inst) {
 	return &inst->blank_settings;
 }

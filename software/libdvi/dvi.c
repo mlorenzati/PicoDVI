@@ -255,67 +255,54 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 	switch (inst->timing_state.v_state) {
 		case DVI_STATE_ACTIVE:
 		{
-		bool is_blank_line = false;
-		bool is_top_bottom_blank =
-			inst->timing_state.v_ctr < (uint)inst->blank_settings.top ||
-			inst->timing_state.v_ctr >= (inst->timing->v_active_lines - (uint)inst->blank_settings.bottom);
-
-		if (!is_top_bottom_blank)
-		{
-			if (queue_try_peek_u32(&inst->q_tmds_valid, &tmdsbuf))
+			bool is_blank_line = false;
+			if (inst->timing_state.v_ctr < (uint)inst->blank_settings.top ||
+				inst->timing_state.v_ctr >= (inst->timing->v_active_lines - (uint)inst->blank_settings.bottom))
 			{
-				if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
-				{
-					queue_remove_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
-					inst->tmds_buf_release_next = tmdsbuf;
-				}
+				// Is a blank line
+				is_blank_line = true;
 			}
 			else
 			{
-				// No valid scanline was ready (generates solid red scanline)
-				tmdsbuf = NULL;
-				if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
-					++inst->late_scanline_ctr;
-			}
-
-			if (inst->scanline_is_enabled && (inst->timing_state.v_ctr & 1))
-			{
-				is_blank_line = true;
-			}
-		}
-		else
-		{
-			// Top/bottom blank line: consume and discard the TMDS buffer so the
-			// queue stays in sync with the encoder on the other core. Without
-			// this, every blank row at top/bottom shifts the displayed image by
-			// one line (image rotation).
-			if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
-			{
-				if (queue_try_remove_u32(&inst->q_tmds_valid, &tmdsbuf))
-					queue_add_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
+				if (queue_try_peek_u32(&inst->q_tmds_valid, &tmdsbuf))
+				{
+					if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
+					{
+						queue_remove_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
+						inst->tmds_buf_release_next = tmdsbuf;
+					}
+				}
 				else
-					++inst->late_scanline_ctr;
-			}
-			is_blank_line = true;
-		}
+				{
+					// No valid scanline was ready (generates solid red scanline)
+					tmdsbuf = NULL;
+					if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
+						++inst->late_scanline_ctr;
+				}
 
-		if (is_blank_line)
-		{
-			_dvi_load_dma_op(inst->dma_cfg, &inst->dma_list_active_blank);
-		}
-		else if (tmdsbuf)
-		{
-			dvi_update_scanline_data_dma(inst->timing, tmdsbuf, &inst->dma_list_active, inst->data_island_is_enabled);
-			_dvi_load_dma_op(inst->dma_cfg, &inst->dma_list_active);
-		}
-		else
-		{
-			_dvi_load_dma_op(inst->dma_cfg, &inst->dma_list_error);
-		}
-		if (inst->scanline_callback && inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
-		{
-			inst->scanline_callback();
-		}
+				if (inst->scanline_is_enabled && (inst->timing_state.v_ctr & 1))
+				{
+					is_blank_line = true;
+				}
+			}
+
+			if (is_blank_line)
+			{
+				_dvi_load_dma_op(inst->dma_cfg, &inst->dma_list_active_blank);
+			}
+			else if (tmdsbuf)
+			{
+				dvi_update_scanline_data_dma(inst->timing, tmdsbuf, &inst->dma_list_active, inst->data_island_is_enabled);
+				_dvi_load_dma_op(inst->dma_cfg, &inst->dma_list_active);
+			}
+			else
+			{
+				_dvi_load_dma_op(inst->dma_cfg, &inst->dma_list_error);
+			}
+			if (inst->scanline_callback && inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
+			{
+				inst->scanline_callback();
+			}
 		}
 		break;
 
@@ -359,6 +346,10 @@ void dvi_audio_init(struct dvi_inst *inst) {
 	inst->left_audio_sample_count = 0;
 	inst->audio_sample_pos = 0;
 	inst->audio_frame_count = 0;
+	inst->blank_settings.top = 0;
+	inst->blank_settings.bottom = 0;
+	inst->blank_settings.left = 0;
+	inst->blank_settings.right = 0;
 }
 
 void dvi_enable_data_island(struct dvi_inst *inst) {

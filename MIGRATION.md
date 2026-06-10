@@ -369,26 +369,7 @@ pio_set_gpio_base(DVI_DEFAULT_SERIAL_CONFIG.pio, 16);
 dvi_register_irqs_this_core(&dvi_inst, DMA_IRQ_0);
 ```
 
-### 3. Set `blank_settings` after `dvi_init()`
-
-```c
-dvi_init(&dvi_inst, next_striped_spin_lock_num(), next_striped_spin_lock_num());
-
-// CORRECT: set blank settings AFTER dvi_init()
-dvi_get_blank_settings(&dvi_inst)->top    = 16;
-dvi_get_blank_settings(&dvi_inst)->bottom = 16;
-
-dvi_register_irqs_this_core(&dvi_inst, DMA_IRQ_0);
-dvi_start(&dvi_inst);
-```
-
-**Why:** `dvi_init()` internally calls `dvi_audio_init()`, which explicitly zeroes all
-`blank_settings` fields. Any values set before `dvi_init()` will be silently
-overwritten. Always configure `blank_settings` after the `dvi_init()` call.
-
----
-
-### 4. Audio setup is identical
+### 3. Audio setup is identical
 
 ```c
 // Same API in both rp2240 and rp2350:
@@ -397,7 +378,7 @@ dvi_audio_sample_buffer_set(&dvi_inst, audio_buffer, AUDIO_BUFFER_SIZE);
 dvi_set_audio_freq(&dvi_inst, 44100, 28000, 6272);
 ```
 
-### 5. Use `dvi_unregister_irqs_this_core()` before stop/restart
+### 4. Use `dvi_unregister_irqs_this_core()` before stop/restart
 
 ```c
 // Old (rp2240 had this; initial rp2350 port was missing it):
