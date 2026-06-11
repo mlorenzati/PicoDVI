@@ -173,7 +173,7 @@ int main() {
 	multicore_launch_core1(core1_main);
 
 	printf("Allocating scanline buffers\n");
-	for (int i = 0; i < N_SCANLINE_BUFFERS; ++i) {
+	for (int i = 0; i < TMDS_PREBUFFERING_LINES; ++i) {
 		void *bufptr = &static_scanbuf[i];
 		queue_add_blocking((void*)&dvi0.q_colour_free, &bufptr);
 	}

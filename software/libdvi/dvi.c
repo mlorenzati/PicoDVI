@@ -1,5 +1,4 @@
 #include <stdlib.h>
-#include <stdio.h>
 #include "hardware/dma.h"
 #include "hardware/irq.h"
 
@@ -24,6 +23,8 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
 	inst->dvi_frame_count = 0;
 
 	dvi_audio_init(inst);
+	dvi_timing_compute_derived(inst->timing, &inst->timing_derived);
+	inst->v_active_last = inst->timing->v_active_lines - (uint)inst->blank_settings.bottom;
 	dvi_timing_state_init(&inst->timing_state);
 	dvi_serialiser_init(&inst->ser_cfg);
 	for (int i = 0; i < N_TMDS_LANES; ++i) {
@@ -33,8 +34,8 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
 		inst->dma_cfg[i].dreq = pio_get_dreq(inst->ser_cfg.pio, inst->ser_cfg.sm_tmds[i], true);
 	}
 	inst->late_scanline_ctr = 0;
-	inst->tmds_buf_release_next = NULL;
-	inst->tmds_buf_release = NULL;
+	inst->tmds_buf_release[0] = NULL;
+	inst->tmds_buf_release[1] = NULL;
 	queue_init_with_spinlock(&inst->q_tmds_valid,   sizeof(void*),  8, spinlock_tmds_queue);
 	queue_init_with_spinlock(&inst->q_tmds_free,    sizeof(void*),  8, spinlock_tmds_queue);
 	queue_init_with_spinlock(&inst->q_colour_valid, sizeof(void*),  8, spinlock_colour_queue);
@@ -47,11 +48,10 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
 	dvi_setup_scanline_for_active(inst->timing, inst->dma_cfg, NULL, &inst->dma_list_active_blank, true);
 
 	for (int i = 0; i < DVI_N_TMDS_BUFFERS; ++i) {
-		void *tmdsbuf;
 #if DVI_MONOCHROME_TMDS
-		tmdsbuf = malloc(inst->timing->h_active_pixels / DVI_SYMBOLS_PER_WORD * sizeof(uint32_t));
+		void *tmdsbuf = malloc(inst->timing_derived.tmds_words_per_channel * sizeof(uint32_t));
 #else
-		tmdsbuf = malloc(3 * inst->timing->h_active_pixels / DVI_SYMBOLS_PER_WORD * sizeof(uint32_t));
+		void *tmdsbuf = malloc(TMDS_CHANNELS * inst->timing_derived.tmds_words_per_channel * sizeof(uint32_t));
 #endif
 		if (!tmdsbuf)
 			panic("TMDS buffer allocation failed");
@@ -93,13 +93,13 @@ void dvi_unregister_irqs_this_core(struct dvi_inst *inst, uint irq_num) {
 		irq_remove_handler(DMA_IRQ_1, dvi_dma1_irq);
 	}
 	// Return any in-flight TMDS buffers back to the free queue
-	if (inst->tmds_buf_release) {
-		queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release);
-		inst->tmds_buf_release = NULL;
+	if (inst->tmds_buf_release[1]) {
+		queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release[1]);
+		inst->tmds_buf_release[1] = NULL;
 	}
-	if (inst->tmds_buf_release_next) {
-		queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release_next);
-		inst->tmds_buf_release_next = NULL;
+	if (inst->tmds_buf_release[0]) {
+		queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release[0]);
+		inst->tmds_buf_release[0] = NULL;
 	}
 }
 
@@ -170,8 +170,8 @@ void dvi_stop(struct dvi_inst *inst) {
 static inline void __dvi_func_x(_dvi_prepare_scanline_8bpp)(struct dvi_inst *inst, uint32_t *scanbuf) {
 	uint32_t *tmdsbuf;
 	queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
+	uint words_per_channel = inst->timing_derived.tmds_words_per_channel;
 	uint pixwidth = inst->timing->h_active_pixels;
-	uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;
 	// Scanline buffers are half-resolution; the functions take the number of *input* pixels as parameter.
 	tmds_encode_data_channel_8bpp(scanbuf, tmdsbuf + 0 * words_per_channel, pixwidth / 2, DVI_8BPP_BLUE_MSB,  DVI_8BPP_BLUE_LSB );
 	tmds_encode_data_channel_8bpp(scanbuf, tmdsbuf + 1 * words_per_channel, pixwidth / 2, DVI_8BPP_GREEN_MSB, DVI_8BPP_GREEN_LSB);
@@ -182,8 +182,8 @@ static inline void __dvi_func_x(_dvi_prepare_scanline_8bpp)(struct dvi_inst *ins
 static inline void __dvi_func_x(_dvi_prepare_scanline_16bpp)(struct dvi_inst *inst, uint32_t *scanbuf) {
 	uint32_t *tmdsbuf;
 	queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
+	uint words_per_channel = inst->timing_derived.tmds_words_per_channel;
 	uint pixwidth = inst->timing->h_active_pixels;
-	uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;
 	tmds_encode_data_channel_16bpp(scanbuf, tmdsbuf + 0 * words_per_channel, pixwidth / 2, DVI_16BPP_BLUE_MSB,  DVI_16BPP_BLUE_LSB );
 	tmds_encode_data_channel_16bpp(scanbuf, tmdsbuf + 1 * words_per_channel, pixwidth / 2, DVI_16BPP_GREEN_MSB, DVI_16BPP_GREEN_LSB);
 	tmds_encode_data_channel_16bpp(scanbuf, tmdsbuf + 2 * words_per_channel, pixwidth / 2, DVI_16BPP_RED_MSB,   DVI_16BPP_RED_LSB  );
@@ -194,32 +194,22 @@ static inline void __dvi_func_x(_dvi_prepare_scanline_16bpp)(struct dvi_inst *in
 
 // Version where each record in q_colour_valid is one scanline:
 void __dvi_func(dvi_scanbuf_main_8bpp)(struct dvi_inst *inst) {
-	uint y = 0;
 	while (1) {
 		uint32_t *scanbuf;
 		queue_remove_blocking_u32(&inst->q_colour_valid, &scanbuf);
 		_dvi_prepare_scanline_8bpp(inst, scanbuf);
 		queue_add_blocking_u32(&inst->q_colour_free, &scanbuf);
-		++y;
-		if (y == inst->timing->v_active_lines) {
-			y = 0;
-		}
 	}
 	__builtin_unreachable();
 }
 
 // Ugh copy/paste but it lets us garbage collect the TMDS stuff that is not being used from .scratch_x
 void __dvi_func(dvi_scanbuf_main_16bpp)(struct dvi_inst *inst) {
-	uint y = 0;
 	while (1) {
 		uint32_t *scanbuf;
 		queue_remove_blocking_u32(&inst->q_colour_valid, &scanbuf);
 		_dvi_prepare_scanline_16bpp(inst, scanbuf);
 		queue_add_blocking_u32(&inst->q_colour_free, &scanbuf);
-		++y;
-		if (y == inst->timing->v_active_lines) {
-			y = 0;
-		}
 	}
 	__builtin_unreachable();
 }
@@ -229,10 +219,11 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 	// now have until the end of this region to generate DMA blocklist for next
 	// scanline.
 	dvi_timing_state_advance(inst->timing, &inst->timing_state);
-	if (inst->tmds_buf_release && !queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release))
+
+	if (inst->tmds_buf_release[1] && !queue_try_add_u32(&inst->q_tmds_free, &inst->tmds_buf_release[1]))
 		panic("TMDS free queue full in IRQ!");
-	inst->tmds_buf_release = inst->tmds_buf_release_next;
-	inst->tmds_buf_release_next = NULL;
+	inst->tmds_buf_release[1] = inst->tmds_buf_release[0];
+	inst->tmds_buf_release[0] = NULL;
 
 	// Make sure all three channels have definitely loaded their last block
 	// (should be within a few cycles of one another).
@@ -240,11 +231,11 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 	// active period). On RP2040, tcr is the live decrementing counter -- the
 	// change to dbg_tcr is a required RP2350 fix.
 	for (int i = 0; i < N_TMDS_LANES; ++i) {
-		while (dma_debug_hw->ch[inst->dma_cfg[i].chan_data].dbg_tcr != inst->timing->h_active_pixels / DVI_SYMBOLS_PER_WORD)
+		while (dma_debug_hw->ch[inst->dma_cfg[i].chan_data].dbg_tcr != inst->timing_derived.tmds_words_per_channel)
 			tight_loop_contents();
 	}
 
-	uint32_t *tmdsbuf;
+	uint32_t *tmdsbuf = NULL;
 	while (inst->late_scanline_ctr > 0 && queue_try_remove_u32(&inst->q_tmds_valid, &tmdsbuf)) {
 		// If we displayed this buffer then it would be in the wrong vertical
 		// position on-screen. Just pass it back.
@@ -257,7 +248,7 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 		{
 			bool is_blank_line = false;
 			if (inst->timing_state.v_ctr < (uint)inst->blank_settings.top ||
-				inst->timing_state.v_ctr >= (inst->timing->v_active_lines - (uint)inst->blank_settings.bottom))
+				inst->timing_state.v_ctr >= inst->v_active_last)
 			{
 				// Is a blank line
 				is_blank_line = true;
@@ -269,7 +260,7 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 					if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
 					{
 						queue_remove_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
-						inst->tmds_buf_release_next = tmdsbuf;
+						inst->tmds_buf_release[0] = tmdsbuf;
 					}
 				}
 				else
@@ -299,9 +290,18 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 			{
 				_dvi_load_dma_op(inst->dma_cfg, &inst->dma_list_error);
 			}
-			if (inst->scanline_callback && inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
+
+			// Only invoke the callback for non-blank lines that actually consume
+			// colour buffers (i.e. lines that go through the TMDS encoder pipeline).
+			// Blank lines at the top/bottom margin do not consume colour data, so
+			// calling the callback for them would advance the application's scanline
+			// counter out of sync with what is actually displayed.
+			if (!is_blank_line && inst->scanline_callback && inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1)
 			{
-				inst->scanline_callback();
+				static uint next_line = TMDS_PREBUFFERING_LINES - 1;
+				if (++next_line >=inst->timing_derived.logical_lines)
+					next_line = 0;
+				inst->scanline_callback(next_line);
 			}
 		}
 		break;

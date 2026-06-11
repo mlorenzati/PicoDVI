@@ -78,7 +78,6 @@
 #define color_green      0b0000011111100000
 #define color_blue       0b0000000000011111
 
-static uint hdmi_scanline = 2;
 uint16_t framebuf[FRAME_HEIGHT][FRAME_WIDTH];
 static graphic_ctx_t graphic_ctx = {
 	.height       = FRAME_HEIGHT,
@@ -130,26 +129,23 @@ bool __not_in_flash("audio_timer_callback") audio_timer_callback(struct repeatin
     return true;
 }
 
-void __not_in_flash("core1_scanline_callback") core1_scanline_callback() {
+void __not_in_flash("core1_scanline_callback") core1_scanline_callback(uint scanline) {
 	void *bufptr  = NULL;
 	queue_remove_blocking(&dvi0.q_colour_free, &bufptr);
-	bufptr = &framebuf[hdmi_scanline];
+	bufptr = &framebuf[scanline];
 
 	queue_add_blocking(&dvi0.q_colour_valid, &bufptr);
-	if (++hdmi_scanline >= FRAME_HEIGHT) {
-		hdmi_scanline = 0;
-	}
 }
 
 void draw_player() {
 	printf("Start rendering\n");
 
+	// Main rect
+	draw_rect(&graphic_ctx, 0, 0, graphic_ctx.width, graphic_ctx.height, color_blue);
+	draw_rect(&graphic_ctx, 1, 1, graphic_ctx.width - 2, graphic_ctx.height - 2, color_light_gray);
+
 	// Mod Name area
 	draw_rect(&graphic_ctx, 3, 3, graphic_ctx.width - 6, 12, color_light_gray);
-
-	// Main rect
-	draw_rect(&graphic_ctx, 1, 1, graphic_ctx.width - 2, graphic_ctx.height - 2, color_light_gray);
-	draw_rect(&graphic_ctx, 0, 0, graphic_ctx.width, graphic_ctx.height, color_blue);
 
 	// Status area
 	draw_rect(&graphic_ctx, 3, graphic_ctx.height - 16, graphic_ctx.width - 6, 12, color_light_gray);
@@ -161,7 +157,7 @@ void draw_player() {
 	draw_textf(&graphic_ctx, 5, 5, color_white, color_black, false, "Name:%s |Duration:%ds", song_name, current_mod_duration / AUDIO_FREQUENCY);
 	draw_textf(&graphic_ctx, 5, graphic_ctx.height - 14, color_white, color_black, false, "Left:%ds",  (current_mod_duration - current_mod_samples_played) / AUDIO_FREQUENCY);
 	
-	//draw_line(&graphic_ctx, 0, 0, graphic_ctx.width - 1, graphic_ctx.height - 1, color_blue);
+	//draw_line(&graphic_ctx, 0, 0,  319 , 239, color_red);
 }
 
 int main() {
@@ -190,7 +186,7 @@ int main() {
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
     
     // HDMI Audio related
-    dvi_get_blank_settings(&dvi0)->top    = 0;
+	dvi_get_blank_settings(&dvi0)->top    = 0;
     dvi_get_blank_settings(&dvi0)->bottom = 0;
     dvi_audio_sample_buffer_set(&dvi0, audio_buffer, AUDIO_BUFFER_SIZE);
     dvi_set_audio_freq(&dvi0, AUDIO_FREQUENCY, 28000, 6272);
@@ -201,7 +197,7 @@ int main() {
 	multicore_launch_core1(core1_main);
 
 	printf("Allocating scanline buffers\n");
-	for (int i = 0; i < hdmi_scanline; ++i) {
+	for (int i = 0; i < TMDS_PREBUFFERING_LINES; ++i) {
 		void *bufptr = &framebuf[i];
 		queue_add_blocking((void*)&dvi0.q_colour_valid, &bufptr);
 	}

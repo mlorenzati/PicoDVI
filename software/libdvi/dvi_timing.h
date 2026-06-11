@@ -22,6 +22,16 @@ struct dvi_timing {
 	uint bit_clk_khz;
 };
 
+// Precomputed values derived from dvi_timing + compile-time constants.
+// Computed once at dvi_init() time and cached in dvi_inst to avoid repeated
+// division/dereference in the IRQ hot path.
+struct dvi_timing_derived {
+	uint32_t tmds_words_per_channel; // h_active_pixels / DVI_SYMBOLS_PER_WORD
+	uint32_t logical_lines;          // v_active_lines / DVI_VERTICAL_REPEAT
+};
+
+void dvi_timing_compute_derived(const struct dvi_timing *t, struct dvi_timing_derived *d);
+
 enum dvi_line_state {
 	DVI_STATE_FRONT_PORCH = 0,
 	DVI_STATE_SYNC,

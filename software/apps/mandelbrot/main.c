@@ -33,16 +33,13 @@ void core1_main() {
 	__builtin_unreachable();
 }
 
-void core1_scanline_callback() {
+void core1_scanline_callback(uint scanline) {
 	// Discard any scanline pointers passed back
 	uint16_t *bufptr;
 	while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
 		;
-	// // Note first two scanlines are pushed before DVI start
-	static uint scanline = 2;
 	bufptr = &framebuf[FRAME_WIDTH * scanline];
 	queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
-	scanline = (scanline + 1) % FRAME_HEIGHT;
 }
 
 int main() {

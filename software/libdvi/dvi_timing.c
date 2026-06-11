@@ -232,6 +232,11 @@ static uint32_t __attribute__((aligned(8))) __dvi_const(empty_scanline_tmds)[6] 
 };
 #endif
 
+void dvi_timing_compute_derived(const struct dvi_timing *t, struct dvi_timing_derived *d) {
+	d->tmds_words_per_channel = t->h_active_pixels / DVI_SYMBOLS_PER_WORD;
+	d->logical_lines          = t->v_active_lines  / DVI_VERTICAL_REPEAT;
+}
+
 void dvi_timing_state_init(struct dvi_timing_state *t) {
 	t->v_ctr = 0;
 	t->v_state = DVI_STATE_FRONT_PORCH;

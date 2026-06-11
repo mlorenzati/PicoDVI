@@ -201,8 +201,6 @@ int main() {
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
     
     // HDMI Audio related
-    dvi_get_blank_settings(&dvi0)->top    = 4 * 2;
-    dvi_get_blank_settings(&dvi0)->bottom = 4 * 2;
     dvi_audio_sample_buffer_set(&dvi0, audio_buffer, AUDIO_BUFFER_SIZE);
     dvi_set_audio_freq(&dvi0, 44100, 28000, 6272);
     add_repeating_timer_ms(2, audio_timer_callback, NULL, &audio_timer);

@@ -7,6 +7,7 @@ extern "C" {
 
 #define N_TMDS_LANES 3
 #define TMDS_SYNC_LANE 0 // blue!
+#define TMDS_PREBUFFERING_LINES 2
 
 #include "pico/util/queue.h"
 
@@ -17,7 +18,8 @@ extern "C" {
 #include "data_packet.h"
 #include "audio_ring.h"
 
-typedef void (*dvi_callback_t)(void);
+// Scanline callback receives the logical scanline index (0-based, after DVI_VERTICAL_REPEAT).
+typedef void (*dvi_callback_t)(uint);
 
 struct dvi_inst {
 	// Config ---
@@ -28,6 +30,11 @@ struct dvi_inst {
 	// Called in the DMA IRQ once per scanline -- careful with the run time!
 	dvi_callback_t scanline_callback;
 
+	// Precomputed from timing + blank_settings at dvi_init() time.
+	// Cached to avoid repeated division/pointer-chase in the IRQ hot path.
+	struct dvi_timing_derived timing_derived;
+	uint32_t v_active_last; // v_active_lines - blank_settings.bottom
+
 	// State ---
 	struct dvi_scanline_dma_list dma_list_vblank_sync;
 	struct dvi_scanline_dma_list dma_list_vblank_nosync;
@@ -35,12 +42,11 @@ struct dvi_inst {
 	struct dvi_scanline_dma_list dma_list_error;
 	struct dvi_scanline_dma_list dma_list_active_blank;
 
-	// After a TMDS buffer has been enqueue via a control block for the last
-	// time, two IRQs must go by before freeing. The first indicates the control
-	// block for this buf has been loaded, and the second occurs some time after
-	// the actual data DMA transfer has completed.
-	uint32_t *tmds_buf_release_next;
-	uint32_t *tmds_buf_release;
+	// After a TMDS buffer has been enqueued via a control block for the last
+	// time, two IRQs must go by before freeing. [0] is the current scanline's
+	// buffer (released next IRQ), [1] is the previous (released this IRQ).
+	uint32_t *tmds_buf_release[2];
+
 	// Remember how far behind the source is on TMDS scanlines, so we can output
 	// solid colour until they catch up (rather than dying spectacularly)
 	uint late_scanline_ctr;
@@ -143,6 +149,8 @@ void dvi_update_data_packet(struct dvi_inst *inst);
 void dvi_wait_for_valid_line(struct dvi_inst *inst);
 
 // Get blank settings struct (top/bottom blank lines).
+// Must be called AFTER dvi_init() since dvi_init() calls dvi_audio_init()
+// which zeroes blank_settings.
 static inline dvi_blank_t *dvi_get_blank_settings(struct dvi_inst *inst) {
 	return &inst->blank_settings;
 }
