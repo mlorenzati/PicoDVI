@@ -92,10 +92,8 @@ static inline void prepare_scanline(const char *chars, uint y) {
 	queue_add_blocking(&dvi0.q_tmds_valid, &tmdsbuf);
 }
 
-void core1_scanline_callback() {
-	static uint y = 1;
-	prepare_scanline(charbuf, y);
-	y = (y + 1) % FRAME_HEIGHT;
+void core1_scanline_callback(uint scanline) {
+	prepare_scanline(charbuf, scanline);
 }
 
 void __not_in_flash("main") core1_main() {

@@ -98,6 +98,34 @@ const int ymin = -100;
 const int ymax = FRAME_HEIGHT - 30;
 const int vmax = 4;
 
+//Audio Related
+#define AUDIO_BUFFER_SIZE   256
+audio_sample_t      audio_buffer[AUDIO_BUFFER_SIZE];
+struct repeating_timer audio_timer;
+const int16_t sine[32] = {
+    0x8000,0x98f8,0xb0fb,0xc71c,0xda82,0xea6d,0xf641,0xfd89,
+    0xffff,0xfd89,0xf641,0xea6d,0xda82,0xc71c,0xb0fb,0x98f8,
+    0x8000,0x6707,0x4f04,0x38e3,0x257d,0x1592,0x9be,0x276,
+    0x0,0x276,0x9be,0x1592,0x257d,0x38e3,0x4f04,0x6707
+};
+
+bool audio_timer_callback(struct repeating_timer *t) {
+    int size = get_write_size(&dvi0.audio_ring, false);
+    audio_sample_t *audio_ptr = get_write_pointer(&dvi0.audio_ring);
+    audio_sample_t sample;
+    static uint sample_count = 0;
+    for (int cnt = 0; cnt < size; cnt++) {
+        sample.channels[0] = sine[sample_count % 32];
+        sample.channels[1] = sine[sample_count % 32];
+        *audio_ptr++ = sample;
+        sample_count++;
+    }
+    increase_write_pointer(&dvi0.audio_ring, size);
+ 
+    return true;
+}
+
+
 void __not_in_flash("render") render_loop() {
 	uint heartbeat = 0;
 	uint frame_ctr = 0;
@@ -142,6 +170,9 @@ void __not_in_flash("render") render_loop() {
 	}
 }
 
+
+
+
 int main() {
 	vreg_set_voltage(VREG_VSEL);
 	sleep_ms(10);
@@ -157,7 +188,7 @@ int main() {
 	setup_default_uart();
 	
 	#if PICO_PIO_USE_GPIO_BASE
-	pio_set_gpio_base(DVI_DEFAULT_SERIAL_CONFIG.pio,16);
+	pio_set_gpio_base(DVI_DEFAULT_SERIAL_CONFIG.pio, 16);
 	#endif
 
 	gpio_init(LED_PIN);
@@ -168,12 +199,17 @@ int main() {
 	dvi0.timing = &DVI_TIMING;
 	dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
+    
+    // HDMI Audio related
+    dvi_audio_sample_buffer_set(&dvi0, audio_buffer, AUDIO_BUFFER_SIZE);
+    dvi_set_audio_freq(&dvi0, 44100, 28000, 6272);
+    add_repeating_timer_ms(2, audio_timer_callback, NULL, &audio_timer);
 
 	printf("Core 1 start\n");
 	multicore_launch_core1(core1_main);
 
 	printf("Allocating scanline buffers\n");
-	for (int i = 0; i < TMDS_PREBUFFERING_LINES; ++i) {
+	for (int i = 0; i < N_SCANLINE_BUFFERS; ++i) {
 		void *bufptr = &static_scanbuf[i];
 		queue_add_blocking((void*)&dvi0.q_colour_free, &bufptr);
 	}

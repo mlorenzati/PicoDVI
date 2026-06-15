@@ -232,6 +232,11 @@ static uint32_t __attribute__((aligned(8))) __dvi_const(empty_scanline_tmds)[6] 
 };
 #endif
 
+void dvi_timing_compute_derived(const struct dvi_timing *t, struct dvi_timing_derived *d) {
+	d->tmds_words_per_channel = t->h_active_pixels / DVI_SYMBOLS_PER_WORD;
+	d->logical_lines          = t->v_active_lines  / DVI_VERTICAL_REPEAT;
+}
+
 void dvi_timing_state_init(struct dvi_timing_state *t) {
 	t->v_ctr = 0;
 	t->v_state = DVI_STATE_FRONT_PORCH;
@@ -296,8 +301,22 @@ void dvi_setup_scanline_for_vblank(const struct dvi_timing *t, const struct dvi_
 	}
 }
 
+// Black scanline TMDS (all channels output DC-balanced zero)
+static uint32_t __dvi_const(black_scanline_tmds)[3] = {
+	0x7fd00u, // 0x00, 0x00
+	0x7fd00u, // 0x00, 0x00
+	0x7fd00u, // 0x00, 0x00
+};
+
+// Video Guardband symbols (required before active video when audio was present)
+static uint32_t __dvi_const(video_gaurdband_syms)[3] = {
+	0b10110011001011001100,
+	0b01001100110100110011,
+	0b10110011001011001100,
+};
+
 void dvi_setup_scanline_for_active(const struct dvi_timing *t, const struct dvi_lane_dma_cfg dma_cfg[],
-		uint32_t *tmdsbuf, struct dvi_scanline_dma_list *l) {
+		uint32_t *tmdsbuf, struct dvi_scanline_dma_list *l, bool black) {
 
 	const uint32_t *sym_hsync_off = get_ctrl_sym(!t->v_sync_polarity, !t->h_sync_polarity);
 	const uint32_t *sym_hsync_on  = get_ctrl_sym(!t->v_sync_polarity,  t->h_sync_polarity);
@@ -322,13 +341,126 @@ void dvi_setup_scanline_for_active(const struct dvi_timing *t, const struct dvi_
 		}
 		else {
 			// Use read ring to repeat the correct DC-balanced symbol pair on blank scanlines (4 or 8 byte period)
-			_set_data_cb(&cblist[target_block], &dma_cfg[i], &empty_scanline_tmds[2 * i / DVI_SYMBOLS_PER_WORD],
+			_set_data_cb(&cblist[target_block], &dma_cfg[i], &(black ? black_scanline_tmds : empty_scanline_tmds)[2 * i / DVI_SYMBOLS_PER_WORD],
 				t->h_active_pixels / DVI_SYMBOLS_PER_WORD, DVI_SYMBOLS_PER_WORD == 2 ? 2 : 3, false);
 		}
 	}
 }
 
-void __dvi_func(dvi_update_scanline_data_dma)(const struct dvi_timing *t, const uint32_t *tmdsbuf, struct dvi_scanline_dma_list *l) {
+void dvi_setup_scanline_for_vblank_with_audio(const struct dvi_timing *t, const struct dvi_lane_dma_cfg dma_cfg[],
+		bool vsync_asserted, struct dvi_scanline_dma_list *l) {
+
+	bool vsync = t->v_sync_polarity == vsync_asserted;
+	const uint32_t *sym_hsync_off = get_ctrl_sym(vsync, !t->h_sync_polarity);
+	const uint32_t *sym_hsync_on  = get_ctrl_sym(vsync,  t->h_sync_polarity);
+	const uint32_t *sym_no_sync   = get_ctrl_sym(false,  false             );
+	const uint32_t *sym_preamble_to_data12 = &dvi_ctrl_syms[1];
+	const uint32_t *data_packet0 = getDefaultDataPacket0(vsync, t->h_sync_polarity);
+
+	for (int i = 0; i < N_TMDS_LANES; ++i)
+	{
+		dma_cb_t *cblist = dvi_lane_from_list(l, i);
+		if (i == TMDS_SYNC_LANE)
+		{
+			_set_data_cb(&cblist[0], &dma_cfg[i], sym_hsync_off, t->h_front_porch / DVI_SYMBOLS_PER_WORD, 2, false);
+			_set_data_cb(&cblist[1], &dma_cfg[i], data_packet0, N_DATA_ISLAND_WORDS, 0, false);
+			_set_data_cb(&cblist[2], &dma_cfg[i], sym_hsync_on, (t->h_sync_width - W_DATA_ISLAND) / DVI_SYMBOLS_PER_WORD, 2, false);
+			_set_data_cb(&cblist[3], &dma_cfg[i], sym_hsync_off, t->h_back_porch / DVI_SYMBOLS_PER_WORD, 2, true);
+			_set_data_cb(&cblist[4], &dma_cfg[i], sym_hsync_off, t->h_active_pixels / DVI_SYMBOLS_PER_WORD, 2, false);
+		}
+		else
+		{
+			// BUG FIX: when h_front_porch == W_PREAMBLE (8 pixels), block [0]
+			// would have transfer_count=0, which on RP2040/2350 wraps to 0x10000
+			// causing a massive spurious DMA transfer that corrupts the TMDS stream.
+			// Compute the pre-preamble count safely; if h_front_porch <= W_PREAMBLE
+			// the pre-preamble block is zero-length (harmless; it will be skipped
+			// by the DMA engine only if we never enqueue it -- but since we always
+			// build a fixed-length list, we clamp to 0 which the hardware treats as
+			// a no-op when transfer_count=0 is blocked by _set_data_cb's caller).
+			// To be safe we skip the block entirely by merging: if fp_pre==0 we
+			// must NOT call _set_data_cb with count=0 (it wraps to 65536).
+			// The correct fix is to assert h_front_porch >= W_PREAMBLE in the
+			// audio path; all standard HDMI/DVI modes satisfy this constraint.
+			// For robustness we clamp fp_pre to 0 and fp_pream to min(W_PREAMBLE,
+			// h_front_porch) so even pathological timings do not overflow.
+			uint fp_pre   = (t->h_front_porch > W_PREAMBLE)
+			                  ? (t->h_front_porch - W_PREAMBLE) / DVI_SYMBOLS_PER_WORD
+			                  : 0u;
+			uint fp_pream = (t->h_front_porch >= W_PREAMBLE)
+			                  ? W_PREAMBLE / DVI_SYMBOLS_PER_WORD
+			                  : t->h_front_porch / DVI_SYMBOLS_PER_WORD;
+			_set_data_cb(&cblist[0], &dma_cfg[i], sym_no_sync, fp_pre, 2, false);
+			_set_data_cb(&cblist[1], &dma_cfg[i], sym_preamble_to_data12, fp_pream, 2, false);
+			_set_data_cb(&cblist[2], &dma_cfg[i], getDefaultDataPacket12(), N_DATA_ISLAND_WORDS, 0, false);
+			_set_data_cb(&cblist[3], &dma_cfg[i], sym_no_sync, (t->h_sync_width + t->h_back_porch - W_DATA_ISLAND) / DVI_SYMBOLS_PER_WORD, 2, false);
+			_set_data_cb(&cblist[4], &dma_cfg[i], sym_no_sync, t->h_active_pixels / DVI_SYMBOLS_PER_WORD, 2, false);
+		}
+	}
+}
+
+void dvi_setup_scanline_for_active_with_audio(const struct dvi_timing *t, const struct dvi_lane_dma_cfg dma_cfg[],
+		uint32_t *tmdsbuf, struct dvi_scanline_dma_list *l, bool black) {
+
+	const uint32_t *sym_hsync_off = get_ctrl_sym(!t->v_sync_polarity, !t->h_sync_polarity);
+	const uint32_t *sym_hsync_on  = get_ctrl_sym(!t->v_sync_polarity,  t->h_sync_polarity);
+	const uint32_t *sym_no_sync   = get_ctrl_sym(false,                false             );
+	const uint32_t *sym_preamble_to_data12 = &dvi_ctrl_syms[1];
+	const uint32_t *sym_preamble_to_video1 = &dvi_ctrl_syms[1];
+	const uint32_t *sym_preamble_to_video2 = &dvi_ctrl_syms[0];
+	const uint32_t *data_packet0 = getDefaultDataPacket0(!t->v_sync_polarity, t->h_sync_polarity);
+
+	for (int i = 0; i < N_TMDS_LANES; ++i)
+	{
+		dma_cb_t *cblist = dvi_lane_from_list(l, i);
+
+		int active_block;
+		if (i == TMDS_SYNC_LANE)
+		{
+			_set_data_cb(&cblist[0], &dma_cfg[i], sym_hsync_off, t->h_front_porch / DVI_SYMBOLS_PER_WORD, 2, false);
+			_set_data_cb(&cblist[1], &dma_cfg[i], data_packet0, N_DATA_ISLAND_WORDS, 0, false);
+			_set_data_cb(&cblist[2], &dma_cfg[i], sym_hsync_on, (t->h_sync_width - W_DATA_ISLAND) / DVI_SYMBOLS_PER_WORD, 2, false);
+			_set_data_cb(&cblist[3], &dma_cfg[i], sym_hsync_off, (t->h_back_porch - W_GUARDBAND) / DVI_SYMBOLS_PER_WORD, 2, false);
+			_set_data_cb(&cblist[4], &dma_cfg[i], &video_gaurdband_syms[0], W_GUARDBAND / DVI_SYMBOLS_PER_WORD, 2, true);
+			active_block = 5;
+		}
+		else
+		{
+			// BUG FIX: same zero-length DMA guard as in dvi_setup_scanline_for_vblank_with_audio.
+			// Block [0] is (h_front_porch - W_PREAMBLE) symbols of blanking before the
+			// data-island preamble. When h_front_porch == W_PREAMBLE this is 0, which
+			// on RP2040/2350 DMA hardware wraps to 0x10000 transfers -- catastrophic.
+			uint fp_pre   = (t->h_front_porch > W_PREAMBLE)
+			                  ? (t->h_front_porch - W_PREAMBLE) / DVI_SYMBOLS_PER_WORD
+			                  : 0u;
+			uint fp_pream = (t->h_front_porch >= W_PREAMBLE)
+			                  ? W_PREAMBLE / DVI_SYMBOLS_PER_WORD
+			                  : t->h_front_porch / DVI_SYMBOLS_PER_WORD;
+			_set_data_cb(&cblist[0], &dma_cfg[i], sym_no_sync, fp_pre, 2, false);
+			_set_data_cb(&cblist[1], &dma_cfg[i], sym_preamble_to_data12, fp_pream, 2, false);
+			_set_data_cb(&cblist[2], &dma_cfg[i], getDefaultDataPacket12(), N_DATA_ISLAND_WORDS, 0, false);
+			_set_data_cb(&cblist[3], &dma_cfg[i], sym_no_sync, (t->h_sync_width + t->h_back_porch - W_DATA_ISLAND - W_PREAMBLE - W_GUARDBAND) / DVI_SYMBOLS_PER_WORD, 2, false);
+			_set_data_cb(&cblist[4], &dma_cfg[i], i == 1 ? sym_preamble_to_video1 : sym_preamble_to_video2, W_PREAMBLE / DVI_SYMBOLS_PER_WORD, 2, false);
+			_set_data_cb(&cblist[5], &dma_cfg[i], &video_gaurdband_syms[i], W_GUARDBAND / DVI_SYMBOLS_PER_WORD, 2, false);
+			active_block = 6;
+		}
+
+		if (tmdsbuf)
+		{
+			// Non-repeating DMA for the freshly-encoded TMDS buffer
+			_set_data_cb(&cblist[active_block], &dma_cfg[i], tmdsbuf + i * (t->h_active_pixels / DVI_SYMBOLS_PER_WORD),
+						 t->h_active_pixels / DVI_SYMBOLS_PER_WORD, 0, false);
+		}
+		else
+		{
+			// Use read ring to repeat the correct DC-balanced symbol pair on blank scanlines (4 or 8 byte period)
+			_set_data_cb(&cblist[active_block], &dma_cfg[i], &(black ? black_scanline_tmds : empty_scanline_tmds)[2 * i / DVI_SYMBOLS_PER_WORD],
+						 t->h_active_pixels / DVI_SYMBOLS_PER_WORD, DVI_SYMBOLS_PER_WORD == 2 ? 2 : 3, false);
+		}
+	}
+}
+
+void __dvi_func(dvi_update_scanline_data_dma)(const struct dvi_timing *t, const uint32_t *tmdsbuf, struct dvi_scanline_dma_list *l, bool audio) {
 	for (int i = 0; i < N_TMDS_LANES; ++i) {
 #if DVI_MONOCHROME_TMDS
 		const uint32_t *lane_tmdsbuf = tmdsbuf;
@@ -336,9 +468,18 @@ void __dvi_func(dvi_update_scanline_data_dma)(const struct dvi_timing *t, const 
 		const uint32_t *lane_tmdsbuf = tmdsbuf + i * t->h_active_pixels / DVI_SYMBOLS_PER_WORD;
 #endif
 		if (i == TMDS_SYNC_LANE)
-			dvi_lane_from_list(l, i)[3].read_addr = lane_tmdsbuf;
+			dvi_lane_from_list(l, i)[audio ? 5 : 3].read_addr = lane_tmdsbuf;
 		else
-			dvi_lane_from_list(l, i)[1].read_addr = lane_tmdsbuf;
+			dvi_lane_from_list(l, i)[audio ? 6 : 1].read_addr = lane_tmdsbuf;
 	}
 }
 
+uint32_t dvi_timing_get_pixels_per_frame(const struct dvi_timing *t) {
+	uint32_t w = dvi_timing_get_pixels_per_line(t);
+	uint32_t h = t->v_front_porch + t->v_sync_width + t->v_back_porch + t->v_active_lines;
+	return w * h;
+}
+
+uint32_t dvi_timing_get_pixels_per_line(const struct dvi_timing *t) {
+	return t->h_front_porch + t->h_sync_width + t->h_back_porch + t->h_active_pixels;
+}

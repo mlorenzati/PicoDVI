@@ -7,6 +7,7 @@ extern "C" {
 
 #define N_TMDS_LANES 3
 #define TMDS_SYNC_LANE 0 // blue!
+#define TMDS_PREBUFFERING_LINES 2
 
 #include "pico/util/queue.h"
 
@@ -14,8 +15,11 @@ extern "C" {
 #include "dvi_timing.h"
 #include "dvi_serialiser.h"
 #include "util_queue_u32_inline.h"
+#include "data_packet.h"
+#include "audio_ring.h"
 
-typedef void (*dvi_callback_t)(void);
+// Scanline callback receives the logical scanline index (0-based, after DVI_VERTICAL_REPEAT).
+typedef void (*dvi_callback_t)(uint);
 
 struct dvi_inst {
 	// Config ---
@@ -25,19 +29,25 @@ struct dvi_inst {
 	struct dvi_serialiser_cfg ser_cfg;
 	// Called in the DMA IRQ once per scanline -- careful with the run time!
 	dvi_callback_t scanline_callback;
+	dvi_callback_t vblank_callback;
+
+	// Precomputed from timing + blank_settings at dvi_init() time.
+	// Cached to avoid repeated division/pointer-chase in the IRQ hot path.
+	struct dvi_timing_derived timing_derived;
+	uint32_t v_active_last; // v_active_lines - blank_settings.bottom
 
 	// State ---
 	struct dvi_scanline_dma_list dma_list_vblank_sync;
 	struct dvi_scanline_dma_list dma_list_vblank_nosync;
 	struct dvi_scanline_dma_list dma_list_active;
 	struct dvi_scanline_dma_list dma_list_error;
+	struct dvi_scanline_dma_list dma_list_active_blank;
 
-	// After a TMDS buffer has been enqueue via a control block for the last
-	// time, two IRQs must go by before freeing. The first indicates the control
-	// block for this buf has been loaded, and the second occurs some time after
-	// the actual data DMA transfer has completed.
-	uint32_t *tmds_buf_release_next;
-	uint32_t *tmds_buf_release;
+	// After a TMDS buffer has been enqueued via a control block for the last
+	// time, two IRQs must go by before freeing. [0] is the current scanline's
+	// buffer (released next IRQ), [1] is the previous (released this IRQ).
+	uint32_t *tmds_buf_release[2];
+
 	// Remember how far behind the source is on TMDS scanlines, so we can output
 	// solid colour until they catch up (rather than dying spectacularly)
 	uint late_scanline_ctr;
@@ -50,6 +60,33 @@ struct dvi_inst {
 	queue_t q_colour_valid;
 	queue_t q_colour_free;
 
+	// HDMI Audio / Data Island ---
+	bool dvi_started;
+	bool data_island_is_enabled;
+	bool scanline_is_enabled;
+	uint dvi_frame_count;
+
+	// Blank line settings (top/bottom lines output as black)
+	dvi_blank_t blank_settings;
+
+	// Data island stream (points into next_data_stream)
+	data_island_stream_t next_data_stream;
+
+	// Audio ring buffer
+	audio_ring_t audio_ring;
+
+	// HDMI InfoFrame packets
+	data_packet_t avi_info_frame;
+	data_packet_t audio_clock_regeneration;
+	data_packet_t audio_info_frame;
+
+	// Audio timing state
+	int audio_freq;
+	uint samples_per_frame;
+	uint64_t samples_per_line16;
+	uint left_audio_sample_count;
+	int64_t audio_sample_pos;
+	uint audio_frame_count;
 };
 
 // Set up data structures and hardware for DVI.
@@ -59,9 +96,21 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
 // whichever core called this function. Registers an exclusive IRQ handler.
 void dvi_register_irqs_this_core(struct dvi_inst *inst, uint irq_num);
 
+// Unregisters DVI IRQ callbacks for this core and returns any in-flight TMDS
+// buffers to the free queue. Call before dvi_stop() when tearing down DVI.
+void dvi_unregister_irqs_this_core(struct dvi_inst *inst, uint irq_num);
+
+// Reports DVI status: true = active, false = inactive.
+static inline bool dvi_is_started(struct dvi_inst *inst) {
+	return inst->dvi_started;
+}
+
 // Start actually wiggling TMDS pairs. Call this once you have initialised the
 // DVI, have registered the IRQs, and are producing rendered scanlines.
 void dvi_start(struct dvi_inst *inst);
+
+// Stop DVI output and disable serialiser.
+void dvi_stop(struct dvi_inst *inst);
 
 // TMDS encode worker function: core enters and doesn't leave, but still
 // responds to IRQs. Repeatedly pop a scanline buffer from q_colour_valid,
@@ -72,6 +121,46 @@ void dvi_scanbuf_main_16bpp(struct dvi_inst *inst);
 // Same as above, but each q_colour_valid entry is a framebuffer
 void dvi_framebuf_main_8bpp(struct dvi_inst *inst);
 void dvi_framebuf_main_16bpp(struct dvi_inst *inst);
+
+// Audio/HDMI Data Island API ---
+
+// Initialise audio state (called from dvi_init).
+void dvi_audio_init(struct dvi_inst *inst);
+
+// Enable HDMI data island mode (called from dvi_set_audio_freq).
+void dvi_enable_data_island(struct dvi_inst *inst);
+
+// Update data island DMA list pointer for a given scanline list.
+void dvi_update_data_island_ptr(struct dvi_scanline_dma_list *dma_list, data_island_stream_t *stream);
+
+// Set the audio sample ring buffer (must be called before dvi_set_audio_freq).
+void dvi_audio_sample_buffer_set(struct dvi_inst *inst, audio_sample_t *buffer, int size);
+
+// Configure audio frequency and enable HDMI audio output.
+// audio_freq: audio sample rate in Hz (e.g. 44100)
+// cts: Clock Time Stamp for audio clock regeneration
+// n:   N value for audio clock regeneration
+// 128 * audio_freq = pixel_clock * N / CTS
+void dvi_set_audio_freq(struct dvi_inst *inst, int audio_freq, int cts, int n);
+
+// Update audio frequency parameters at runtime without re-enabling the data
+// island. Use this when the sample rate changes after the initial setup (e.g.
+// switching between 44100/48000 Hz). Unlike dvi_set_audio_freq, this does NOT
+// call dvi_enable_data_island(), so it is safe to call while DVI is running.
+void dvi_update_audio_freq(struct dvi_inst *inst, int audio_freq, int cts, int n);
+
+// Called from IRQ handler each scanline when data island is enabled.
+void dvi_update_data_packet(struct dvi_inst *inst);
+
+// Block until at least one colour buffer is in the valid queue.
+void dvi_wait_for_valid_line(struct dvi_inst *inst);
+
+// Get blank settings struct (top/bottom blank lines).
+// Must be called AFTER dvi_init() since dvi_init() calls dvi_audio_init()
+// which zeroes blank_settings.
+static inline dvi_blank_t *dvi_get_blank_settings(struct dvi_inst *inst) {
+	return &inst->blank_settings;
+}
 
 #ifdef __cplusplus
 }
