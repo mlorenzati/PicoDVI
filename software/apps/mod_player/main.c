@@ -123,7 +123,11 @@ void start_mod(uint8_t idx) {
 }
 
 uint ms2_count = 0;
-bool second_event = true;
+bool half_second_event = true;
+#define GRAPH_BUFFER_SIZE 32
+int16_t graph[2][GRAPH_BUFFER_SIZE];
+unsigned char graph_idx = 0;
+char ms_64_count = 0;
 bool __not_in_flash("audio_timer_callback") audio_timer_callback(struct repeating_timer *t) {
 	// Clamp write size to the contiguous space before the end of the physical
 	// buffer. get_write_size() returns the logical free space which may wrap
@@ -136,11 +140,25 @@ bool __not_in_flash("audio_timer_callback") audio_timer_callback(struct repeatin
 	audio_sample_t *audio_ptr = get_write_pointer(&dvi0.audio_ring);
 	memset(audio_ptr, 0, size * sizeof(audio_sample_t));
 	micromod_get_audio((short *) audio_ptr, size);
+
 	increase_write_pointer(&dvi0.audio_ring, size);
 	current_mod_samples_played += size;
-	if (++ms2_count >= 500) {
+	if (++ms_64_count >= 32) {
+		ms_64_count = 0;
+		int32_t ch0 = 0, ch1 = 0;
+		for (int i = 0; i < size; i++) {
+			ch0 += audio_ptr->channels[0];
+			ch1 += audio_ptr->channels[1];
+		}
+		graph[0][graph_idx] = ch0 / size;
+		graph[1][graph_idx] = ch1 / size;
+		if (++graph_idx >= GRAPH_BUFFER_SIZE) {
+			graph_idx = 0;
+		}
+	}
+	if (++ms2_count >= 250) {
 		ms2_count = 0;
-		second_event = true;
+		half_second_event = true;
 	}
     return true;
 }
@@ -214,7 +232,7 @@ int main() {
     // IRQ-based consumer, preventing the reader from catching up to the writer
     // and ensuring smooth audio even under transient CPU load spikes.
     set_read_offset(&dvi0.audio_ring, AUDIO_BUFFER_SIZE / 2);
-    add_repeating_timer_ms(2, audio_timer_callback, NULL, &audio_timer);
+    add_repeating_timer_us(2, audio_timer_callback, NULL, &audio_timer);
 	start_mod(current_mod_idx);
 
 	//printf("Core 1 start\n");
@@ -228,17 +246,43 @@ int main() {
 
 	draw_player();
 
+	//int16_t old_graph[2][GRAPH_BUFFER_SIZE];
 	while (1)
 	{	
-		if (second_event) {
-			second_event = false;
+		if (half_second_event) {
+			half_second_event = false;
 			seconds_play_left--;
 			if (current_mod_samples_played >= current_mod_duration) {
 				current_mod_idx = (current_mod_idx + 1) % mod_count;
 				start_mod(current_mod_idx);
 				draw_player();
 			} else {
-				draw_textf(&graphic_ctx, 45, 18, color_white, color_black, false, "%ds", seconds_play_left);
+				unsigned int y1_prev = 90 + (graph[0][0] / 512);
+				unsigned int y2_prev = 170 + (graph[1][0] / 512);
+				// unsigned int y1_prev_old = 64 + (old_graph[0][0] / 2048);
+				// unsigned int y2_prev_old = 128 + (old_graph[1][0] / 2048);
+				// old_graph[0][0] = graph[0][0];
+				// old_graph[1][0] = graph[1][0];
+
+				// Erase old
+				fill_rect(&graphic_ctx, 8, 30, graphic_ctx.width - 8, 240 - 32, color_black);
+
+				for (unsigned char i = 1; i < GRAPH_BUFFER_SIZE; i++) {
+					unsigned int y1_next = 90 +  (graph[0][i] / 512);
+					unsigned int y2_next = 170 + (graph[1][i] / 512);
+					// unsigned int y1_next_old = 64 +  (old_graph[0][i] / 2048);
+					// unsigned int y2_next_old = 128 + (old_graph[1][i] / 2048);
+
+					// draw_line(&graphic_ctx, 8 + (i - 1) * 16, y1_prev_old,  8 + i * 16 , y1_next_old, color_black);
+					// draw_line(&graphic_ctx, 8 + (i - 1) * 16, y2_prev_old,  8 + i * 16 , y2_next_old, color_black);
+					draw_line(&graphic_ctx, 8 + (i - 1) * 9, y1_prev,  8 + i * 9, y1_next, color_red);
+					draw_line(&graphic_ctx, 8 + (i - 1) * 9, y2_prev,  8 + i * 9, y2_next, color_blue);
+					y1_prev = y1_next;
+					y2_prev = y2_next;
+					// old_graph[0][i] = graph[0][i];
+					// old_graph[1][i] = graph[1][i];
+				}
+				// draw_textf(&graphic_ctx, 45, 18, color_white, color_black, false, "%ds", seconds_play_left);
 			}
 		}
 		
