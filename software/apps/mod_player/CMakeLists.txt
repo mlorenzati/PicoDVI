@@ -31,6 +31,7 @@ target_link_libraries(mod_player
 	hardware_timer
 	libdvi
 	libgraphics
+	pico_rand
 )
 
 # create map/bin/hex file etc.

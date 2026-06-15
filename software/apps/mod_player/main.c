@@ -103,7 +103,12 @@ void core1_main() {
 //Audio Related
 #define AUDIO_FREQUENCY 	44100
 #define AUDIO_BUFFER_SIZE   256
-audio_sample_t      audio_buffer[2 * AUDIO_BUFFER_SIZE];
+// Two copies of AUDIO_BUFFER_SIZE: the ring uses indices [0, AUDIO_BUFFER_SIZE),
+// and the read pointer is pre-offset to the midpoint (AUDIO_BUFFER_SIZE/2) to
+// create a half-buffer gap between the timer-based producer and the IRQ consumer.
+// The ring must be a power-of-two in size for the modulo-based pointer wrapping
+// in audio_ring.c to work correctly.
+audio_sample_t      audio_buffer[AUDIO_BUFFER_SIZE];
 struct repeating_timer audio_timer;
 
 // Mod related
@@ -117,15 +122,26 @@ void start_mod(uint8_t idx) {
 	current_mod_samples_played = 0;
 }
 
-volatile bool feed_audio = false;
+uint ms2_count = 0;
+bool second_event = true;
 bool __not_in_flash("audio_timer_callback") audio_timer_callback(struct repeating_timer *t) {
-    feed_audio = true;
+	// Clamp write size to the contiguous space before the end of the physical
+	// buffer. get_write_size() returns the logical free space which may wrap
+	// around the end of audio_buffer[]. Writing that many samples linearly
+	// (memset / micromod_get_audio) would overflow past the array end.
+	uint32_t wp = get_write_offset(&dvi0.audio_ring);
+	uint32_t max_contiguous = AUDIO_BUFFER_SIZE - wp;
 	uint32_t size = get_write_size(&dvi0.audio_ring, false);
+	if (size > max_contiguous) size = max_contiguous;
 	audio_sample_t *audio_ptr = get_write_pointer(&dvi0.audio_ring);
 	memset(audio_ptr, 0, size * sizeof(audio_sample_t));
 	micromod_get_audio((short *) audio_ptr, size);
 	increase_write_pointer(&dvi0.audio_ring, size);
 	current_mod_samples_played += size;
+	if (++ms2_count >= 500) {
+		ms2_count = 0;
+		second_event = true;
+	}
     return true;
 }
 
@@ -137,9 +153,8 @@ void __not_in_flash("core1_scanline_callback") core1_scanline_callback(uint scan
 	queue_add_blocking(&dvi0.q_colour_valid, &bufptr);
 }
 
+uint seconds_play_left = 0;
 void draw_player() {
-	printf("Start rendering\n");
-
 	// Main rect
 	draw_rect(&graphic_ctx, 0, 0, graphic_ctx.width, graphic_ctx.height, color_blue);
 	draw_rect(&graphic_ctx, 1, 1, graphic_ctx.width - 2, graphic_ctx.height - 2, color_light_gray);
@@ -148,16 +163,20 @@ void draw_player() {
 	draw_rect(&graphic_ctx, 3, 3, graphic_ctx.width - 6, 12, color_light_gray);
 
 	// Status area
-	draw_rect(&graphic_ctx, 3, graphic_ctx.height - 16, graphic_ctx.width - 6, 12, color_light_gray);
+	draw_rect(&graphic_ctx, 3, 16, graphic_ctx.width - 6, 12, color_light_gray);
 	
 	char song_name[24];
 	micromod_get_string(0, song_name);
 	song_name[16] = 0;
 
+	seconds_play_left = (current_mod_duration - current_mod_samples_played) / AUDIO_FREQUENCY;
 	draw_textf(&graphic_ctx, 5, 5, color_white, color_black, false, "Name:%s |Duration:%ds", song_name, current_mod_duration / AUDIO_FREQUENCY);
-	draw_textf(&graphic_ctx, 5, graphic_ctx.height - 14, color_white, color_black, false, "Left:%ds",  (current_mod_duration - current_mod_samples_played) / AUDIO_FREQUENCY);
+	draw_textf(&graphic_ctx, 5, 18, color_white, color_black, false, "Left:%ds ", seconds_play_left);
 	
 	//draw_line(&graphic_ctx, 0, 0,  319 , 239, color_red);
+}
+
+void __not_in_flash("core1_vblank_callback") core1_vblank_callback(uint frame_number) {
 }
 
 int main() {
@@ -171,18 +190,18 @@ int main() {
 	// Run system at TMDS bit clock
 	set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
 #endif
-
-	setup_default_uart();
+	// setup_default_uart();
 	
 	#if PICO_PIO_USE_GPIO_BASE
 	pio_set_gpio_base(DVI_DEFAULT_SERIAL_CONFIG.pio, 16);
 	#endif
 
-	printf("Configuring DVI\n");
+	//printf("Configuring DVI\n");
 
 	dvi0.timing = &DVI_TIMING;
 	dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
 	dvi0.scanline_callback = core1_scanline_callback;
+	// dvi0.vblank_callback = core1_vblank_callback;
 	dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
     
     // HDMI Audio related
@@ -190,13 +209,18 @@ int main() {
     dvi_get_blank_settings(&dvi0)->bottom = 0;
     dvi_audio_sample_buffer_set(&dvi0, audio_buffer, AUDIO_BUFFER_SIZE);
     dvi_set_audio_freq(&dvi0, AUDIO_FREQUENCY, 28000, 6272);
+    // Start the read pointer at the midpoint of the buffer (learned from PicoDVI-N64).
+    // This creates a natural half-buffer gap between the timer-based producer and the
+    // IRQ-based consumer, preventing the reader from catching up to the writer
+    // and ensuring smooth audio even under transient CPU load spikes.
+    set_read_offset(&dvi0.audio_ring, AUDIO_BUFFER_SIZE / 2);
     add_repeating_timer_ms(2, audio_timer_callback, NULL, &audio_timer);
 	start_mod(current_mod_idx);
 
-	printf("Core 1 start\n");
+	//printf("Core 1 start\n");
 	multicore_launch_core1(core1_main);
 
-	printf("Allocating scanline buffers\n");
+	//printf("Allocating scanline buffers\n");
 	for (int i = 0; i < TMDS_PREBUFFERING_LINES; ++i) {
 		void *bufptr = &framebuf[i];
 		queue_add_blocking((void*)&dvi0.q_colour_valid, &bufptr);
@@ -205,20 +229,19 @@ int main() {
 	draw_player();
 
 	while (1)
-	{
-		// if (++ms_2count >= 500) {
-		// 	ms_2count = 0;
-		// 	// Second event
-		// 	draw_textf(&graphic_ctx, 5, graphic_ctx.height - 14, color_white, color_black, false, "Left:%ds",  (current_mod_duration - current_mod_samples_played) / AUDIO_FREQUENCY);
-
-		// 	if (current_mod_samples_played >= current_mod_duration) {
-		// 		current_mod_idx = (current_mod_idx + 1) % mod_count;
-		// 		start_mod(current_mod_idx);
-		// 		draw_player();
-		// 	}
-		// }
+	{	
+		if (second_event) {
+			second_event = false;
+			seconds_play_left--;
+			if (current_mod_samples_played >= current_mod_duration) {
+				current_mod_idx = (current_mod_idx + 1) % mod_count;
+				start_mod(current_mod_idx);
+				draw_player();
+			} else {
+				draw_textf(&graphic_ctx, 45, 18, color_white, color_black, false, "%ds", seconds_play_left);
+			}
+		}
 		
-		sleep_ms(1000);
 	}
 	__builtin_unreachable();
 }

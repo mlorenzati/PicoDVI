@@ -29,6 +29,7 @@ struct dvi_inst {
 	struct dvi_serialiser_cfg ser_cfg;
 	// Called in the DMA IRQ once per scanline -- careful with the run time!
 	dvi_callback_t scanline_callback;
+	dvi_callback_t vblank_callback;
 
 	// Precomputed from timing + blank_settings at dvi_init() time.
 	// Cached to avoid repeated division/pointer-chase in the IRQ hot path.
@@ -141,6 +142,12 @@ void dvi_audio_sample_buffer_set(struct dvi_inst *inst, audio_sample_t *buffer, 
 // n:   N value for audio clock regeneration
 // 128 * audio_freq = pixel_clock * N / CTS
 void dvi_set_audio_freq(struct dvi_inst *inst, int audio_freq, int cts, int n);
+
+// Update audio frequency parameters at runtime without re-enabling the data
+// island. Use this when the sample rate changes after the initial setup (e.g.
+// switching between 44100/48000 Hz). Unlike dvi_set_audio_freq, this does NOT
+// call dvi_enable_data_island(), so it is safe to call while DVI is running.
+void dvi_update_audio_freq(struct dvi_inst *inst, int audio_freq, int cts, int n);
 
 // Called from IRQ handler each scanline when data island is enabled.
 void dvi_update_data_packet(struct dvi_inst *inst);

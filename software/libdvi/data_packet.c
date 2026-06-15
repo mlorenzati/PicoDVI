@@ -302,7 +302,7 @@ void set_AVI_info_frame(data_packet_t *data_packet, scan_info s, pixel_format y,
     compute_parity(data_packet);
 }
 
-void encode(data_island_stream_t *dst, const data_packet_t *packet, bool vsync, bool hsync) {
+void __not_in_flash_func(encode)(data_island_stream_t *dst, const data_packet_t *packet, bool vsync, bool hsync) {
     int hv = (vsync ? 2 : 0) | (hsync ? 1 : 0);
     dst->data[0][0] = makeTERC4x2Char(0b1100 | hv);
     dst->data[1][0] = dataGaurdbandSym_;

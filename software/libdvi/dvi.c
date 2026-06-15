@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 
 #include "dvi.h"
 #include "dvi_timing.h"
@@ -80,6 +81,11 @@ void dvi_register_irqs_this_core(struct dvi_inst *inst, uint irq_num) {
 		dma_irq_privdata[1] = inst;
 		irq_set_exclusive_handler(DMA_IRQ_1, dvi_dma1_irq);
 	}
+	// Give the DVI DMA IRQ high priority so it preempts core 0/1 SRAM-intensive
+	// work (e.g. framebuffer writes) that could cause bus contention and
+	// late-scanline errors. Priority 0x40 is high but leaves room above for
+	// truly critical IRQs (0x00 = highest on ARM Cortex-M33/M0+).
+	irq_set_priority(irq_num, 0x40);
 	irq_set_enabled(irq_num, true);
 }
 
@@ -310,6 +316,8 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
 			_dvi_load_dma_op(inst->dma_cfg, &inst->dma_list_vblank_sync);
 			if (inst->timing_state.v_ctr == 0) {
 				++inst->dvi_frame_count;
+				if (inst->vblank_callback)
+            		inst->vblank_callback(inst->dvi_frame_count);
 			}
 			break;
 
@@ -404,12 +412,24 @@ void dvi_set_audio_freq(struct dvi_inst *inst, int audio_freq, int cts, int n) {
 	dvi_enable_data_island(inst);
 }
 
+void dvi_update_audio_freq(struct dvi_inst *inst, int audio_freq, int cts, int n) {
+	inst->audio_freq = audio_freq;
+	set_audio_clock_regeneration(&inst->audio_clock_regeneration, cts, n);
+	set_audio_info_frame(&inst->audio_info_frame, audio_freq);
+	uint pixelClock   = dvi_timing_get_pixel_clock(inst->timing);
+	uint nPixPerFrame = dvi_timing_get_pixels_per_frame(inst->timing);
+	uint nPixPerLine  = dvi_timing_get_pixels_per_line(inst->timing);
+	inst->samples_per_frame  = (uint64_t)(audio_freq) * nPixPerFrame / pixelClock;
+	inst->samples_per_line16 = (uint64_t)(audio_freq) * nPixPerLine * 65536 / pixelClock;
+	// Note: does NOT call dvi_enable_data_island() -- safe to call while running.
+}
+
 void dvi_wait_for_valid_line(struct dvi_inst *inst) {
 	uint32_t *tmdsbuf = NULL;
 	queue_peek_blocking_u32(&inst->q_colour_valid, &tmdsbuf);
 }
 
-bool dvi_update_data_packet_(struct dvi_inst *inst, data_packet_t *packet) {
+bool static inline dvi_update_data_packet_(struct dvi_inst *inst, data_packet_t *packet) {
 	if (inst->samples_per_frame == 0) {
 		return false;
 	}
@@ -431,7 +451,9 @@ bool dvi_update_data_packet_(struct dvi_inst *inst, data_packet_t *packet) {
 	}
 	int sample_pos_16 = inst->audio_sample_pos >> 16;
 	int read_size = get_read_size(&inst->audio_ring, false);
-	int n = MAX(0, MIN(4, MIN(sample_pos_16, read_size)));
+	// Cap n at 3: data_packet subpacket[] has indices 0..3 only.
+	// n=4 would cause subpacket[4] out-of-bounds in set_audio_sample's memset.
+	int n = MAX(0, MIN(3, MIN(sample_pos_16, read_size)));
 	inst->audio_sample_pos -= n << 16;
 	if (n) {
 		audio_sample_t *audio_sample_ptr = get_read_pointer(&inst->audio_ring);
@@ -443,7 +465,7 @@ bool dvi_update_data_packet_(struct dvi_inst *inst, data_packet_t *packet) {
 	return false;
 }
 
-void dvi_update_data_packet(struct dvi_inst *inst) {
+void __dvi_func(dvi_update_data_packet)(struct dvi_inst *inst) {
 	data_packet_t packet;
 	if (!dvi_update_data_packet_(inst, &packet)) {
 		set_null(&packet);
