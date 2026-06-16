@@ -1,6 +1,6 @@
 RP2350 PicoDVI with HDMI and audio support
 ======================
-[![PicoDVI HMDI audio](https://github.com/user-attachments/assets/6ea3a048-66a8-48ed-87f1-e329627d5f35)](https://youtu.be/EjZ0ojXpyuk "PicoDVI rp2350 with HDMI Audio")
+[![PicoDVI HMDI audio](https://github.com/user-attachments/assets/db1cd008-275c-49bd-9138-50b31ab0f1b8)](https://youtu.be/LYT6k1Kfmc8 "PicoDVI rp2350 with HDMI Audio")
 
 Changes from [Wren6991 PicoDVI](https://github.com/Wren6991/PicoDVI)
 - HDMI support test
