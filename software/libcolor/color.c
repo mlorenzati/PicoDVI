@@ -85,3 +85,23 @@ uint bppx_merge_color(color_bppx bppx, uint8_t red, uint8_t green, uint8_t blue,
     }
     return ((red&((1<<b_red) - 1))<<(b_green+b_blue))|((green&((1<<b_green) - 1))<<b_blue)|(blue&((1<<b_blue) - 1));
 }
+
+uint bppx_blur_color(color_bppx bppx, uint c, uint l, uint r, uint u, uint d) {
+    uint cr, cg, cb;
+    uint lr, lg, lb;
+    uint rr, rg, rb;
+    uint ur, ug, ub;
+    uint dr, dg, db;
+
+    bppx_split_color(bppx, c, &cr, &cg, &cb, true);
+    bppx_split_color(bppx, l, &lr, &lg, &lb, true);
+    bppx_split_color(bppx, r, &rr, &rg, &rb, true);
+    bppx_split_color(bppx, u, &ur, &ug, &ub, true);
+    bppx_split_color(bppx, d, &dr, &dg, &db, true);
+
+    cr = ((cr << 2) + lr + rr + ur + dr) >> 3;
+    cg = ((cg << 2) + lg + rg + ug + dg) >> 3;
+    cb = ((cb << 2) + lb + rb + ub + db) >> 3;
+
+    return bppx_merge_color(bppx, cr, cg, cb, true);
+}

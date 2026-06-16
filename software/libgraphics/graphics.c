@@ -82,6 +82,24 @@ void fill_rect(const graphic_ctx_t *ctx, uint x0, uint y0, uint width, uint heig
 			put_pixel(ctx, x, y, color);
 }
 
+void blur_rect_fast_inplace(const graphic_ctx_t *ctx, uint x0, uint y0, uint width, uint height) {
+    uint x1 = x0 + width - 1;
+    uint y1 = y0 + height - 1;
+
+    for (uint y = y0 + 1; y < y1; y++) {
+        for (uint x = x0 + 1; x < x1; x++) {
+
+            uint c = get_pixel(ctx, x,     y);
+            uint l = get_pixel(ctx, x - 1, y);
+            uint r = get_pixel(ctx, x + 1, y);
+            uint u = get_pixel(ctx, x,     y - 1);
+            uint d = get_pixel(ctx, x,     y + 1);
+
+            put_pixel(ctx, x, y, bppx_blur_color(ctx->bppx, c, l, r, u, d));
+        }
+    }
+}
+
 void draw_bresen(const graphic_ctx_t *ctx, uint xc, uint yc, uint x, uint y, uint color) {
     put_pixel(ctx, xc + x, yc + y, color);
     put_pixel(ctx, xc - x, yc + y, color);

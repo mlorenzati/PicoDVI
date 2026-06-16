@@ -21,4 +21,5 @@ uint    bppx_get_color(color_bppx bppx, void *buffer);
 void    bppx_put_color(color_bppx bppx, void *buffer, uint color);
 void    bppx_split_color(color_bppx bppx, uint color, uint *red, uint *green, uint *blue, bool normalized);
 uint    bppx_merge_color(color_bppx bppx, uint8_t red, uint8_t green, uint8_t blue, bool normalized);
+uint    bppx_blur_color(color_bppx bppx, uint c, uint l, uint r, uint u, uint d); 
 #endif
