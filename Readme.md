@@ -1,11 +1,12 @@
 RP2350 PicoDVI with HDMI and audio support
 ======================
-[![PicoDVI HMDI audio](https://github.com/user-attachments/assets/db1cd008-275c-49bd-9138-50b31ab0f1b8)](https://youtu.be/LYT6k1Kfmc8 "PicoDVI rp2350 with HDMI Audio")
+[![PicoDVI HMDI audio](https://github.com/user-attachments/assets/db1cd008-275c-49bd-9138-50b31ab0f1b8)](https://youtu.be/LYT6k1Kfmc8 "PicoDVI rp2350 with HDMI Audio") <img width="400"  alt="image" src="https://github.com/user-attachments/assets/164942cb-77df-4b6b-b47c-7b3bac08adad" />
 
 Changes from [Wren6991 PicoDVI](https://github.com/Wren6991/PicoDVI)
 - HDMI support test
 - Audio capability
 - Audio demos (mod player and simple wave test)
+- Validated support on Waveshare RP2350-PiZero and other rp2350 with extended gpio
 
 Changes from the public GitHub version:
 
